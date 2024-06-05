@@ -4536,7 +4536,7 @@ func Test_pathSymlink_errors(t *testing.T) {
 	ok = mem.Write(link, []byte(linkName))
 	require.True(t, ok)
 
-	success_cases := []struct {
+	successCases := []struct {
 		name    string
 		fd      int32
 		oldPath string
@@ -4556,7 +4556,7 @@ func Test_pathSymlink_errors(t *testing.T) {
 		},
 	}
 
-	for _, tt := range success_cases {
+	for _, tt := range successCases {
 		tc := tt
 
 		t.Run(tc.name, func(t *testing.T) {
