@@ -54,9 +54,6 @@ type Builder interface {
 	// MustFindValue searches the latest definition of the given Variable and returns the result.
 	MustFindValue(variable Variable) Value
 
-	// MustFindValueInBlk is the same as MustFindValue except it searches the latest definition from the given BasicBlock.
-	MustFindValueInBlk(variable Variable, blk BasicBlock) Value
-
 	// FindValueInLinearPath tries to find the latest definition of the given Variable in the linear path to the current BasicBlock.
 	// If it cannot find the definition, or it's not sealed yet, it returns ValueInvalid.
 	FindValueInLinearPath(variable Variable) Value
@@ -127,7 +124,11 @@ type Builder interface {
 	// Idom returns the immediate dominator of the given BasicBlock.
 	Idom(blk BasicBlock) BasicBlock
 
+	// VarLengthPool returns the VarLengthPool of Value.
 	VarLengthPool() *wazevoapi.VarLengthPool[Value]
+
+	// InsertZeroValue inserts a zero value constant instruction of the given type.
+	InsertZeroValue(t Type)
 }
 
 // NewBuilder returns a new Builder implementation.
@@ -139,7 +140,6 @@ func NewBuilder() Builder {
 		varLengthPool:                  wazevoapi.NewVarLengthPool[Value](),
 		valueAnnotations:               make(map[ValueID]string),
 		signatures:                     make(map[SignatureID]*Signature),
-		blkVisited:                     make(map[*basicBlock]int),
 		valueIDAliases:                 make(map[ValueID]Value),
 		redundantParameterIndexToValue: make(map[int]Value),
 		returnBlk:                      &basicBlock{id: basicBlockIDReturnBlock},
@@ -185,7 +185,6 @@ type builder struct {
 
 	// The followings are used for optimization passes/deterministic compilation.
 	instStack                      []*Instruction
-	blkVisited                     map[*basicBlock]int
 	valueIDToInstruction           []*Instruction
 	blkStack                       []*basicBlock
 	blkStack2                      []*basicBlock
@@ -203,6 +202,32 @@ type builder struct {
 	donePostBlockLayoutPasses bool
 
 	currentSourceOffset SourceOffset
+
+	// zeros are the zero value constants for each type.
+	zeros [typeEnd]Value
+}
+
+// InsertZeroValue implements Builder.InsertZeroValue.
+func (b *builder) InsertZeroValue(t Type) {
+	if b.zeros[t].Valid() {
+		return
+	}
+	zeroInst := b.AllocateInstruction()
+	switch t {
+	case TypeI32:
+		zeroInst.AsIconst32(0)
+	case TypeI64:
+		zeroInst.AsIconst64(0)
+	case TypeF32:
+		zeroInst.AsF32const(0)
+	case TypeF64:
+		zeroInst.AsF64const(0)
+	case TypeV128:
+		zeroInst.AsVconst(0, 0)
+	default:
+		panic("TODO: " + t.String())
+	}
+	b.zeros[t] = zeroInst.Insert(b).Return()
 }
 
 func (b *builder) VarLengthPool() *wazevoapi.VarLengthPool[Value] {
@@ -218,6 +243,7 @@ func (b *builder) ReturnBlock() BasicBlock {
 func (b *builder) Init(s *Signature) {
 	b.nextVariable = 0
 	b.currentSignature = s
+	b.zeros = [typeEnd]Value{ValueInvalid, ValueInvalid, ValueInvalid, ValueInvalid, ValueInvalid, ValueInvalid}
 	resetBasicBlock(b.returnBlk)
 	b.instructionsPool.Reset()
 	b.basicBlocksPool.Reset()
@@ -235,11 +261,6 @@ func (b *builder) Init(s *Signature) {
 	b.blkStack2 = b.blkStack2[:0]
 	b.dominators = b.dominators[:0]
 	b.loopNestingForestRoots = b.loopNestingForestRoots[:0]
-
-	for i := 0; i < b.basicBlocksPool.Allocated(); i++ {
-		blk := b.basicBlocksPool.View(i)
-		delete(b.blkVisited, blk)
-	}
 	b.basicBlocksPool.Reset()
 
 	for v := ValueID(0); v < b.nextValueID; v++ {
@@ -452,11 +473,6 @@ func (b *builder) findValueInLinearPath(variable Variable, blk *basicBlock) Valu
 	return ValueInvalid
 }
 
-func (b *builder) MustFindValueInBlk(variable Variable, blk BasicBlock) Value {
-	typ := b.definedVariableType(variable)
-	return b.findValue(typ, variable, blk.(*basicBlock))
-}
-
 // MustFindValue implements Builder.MustFindValue.
 func (b *builder) MustFindValue(variable Variable) Value {
 	typ := b.definedVariableType(variable)
@@ -486,6 +502,9 @@ func (b *builder) findValue(typ Type, variable Variable, blk *basicBlock) Value 
 			value:    value,
 		})
 		return value
+	} else if blk.EntryBlock() {
+		// If this is the entry block, we reach the uninitialized variable which has zero value.
+		return b.zeros[b.definedVariableType(variable)]
 	}
 
 	if pred := blk.singlePred; pred != nil {
